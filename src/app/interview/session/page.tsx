@@ -10,7 +10,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useToast } from '@/hooks/use-toast';
 import { ArrowRight, Bot, Loader2, User, Mic, MicOff } from 'lucide-react';
-import { Separator } from '@/components/ui/separator';
 import { simulateInterview } from '@/ai/flows/simulate-interview';
 import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
 
@@ -41,7 +40,16 @@ export default function InterviewSessionPage() {
   // New state for speech recognition
   const [isRecording, setIsRecording] = useState(false);
   const [hasMicrophonePermission, setHasMicrophonePermission] = useState(false);
+  const [hasCameraPermission, setHasCameraPermission] = useState(false);
+  const [recordedVideoBlob, setRecordedVideoBlob] = useState<Blob | null>(null);
+  const [recordedVideoUrl, setRecordedVideoUrl] = useState<string>('');
+  const [detectedEmotion, setDetectedEmotion] = useState('');
+  const [isEmotionLoading, setIsEmotionLoading] = useState(false);
   const recognitionRef = useRef<any>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordingMimeTypeRef = useRef<string>('video/webm');
+  const videoChunksRef = useRef<Blob[]>([]);
 
   const scrollAreaRef = useRef<HTMLDivElement>(null);
 
@@ -83,15 +91,18 @@ export default function InterviewSessionPage() {
     const getMicrophonePermission = async () => {
       if (typeof window !== 'undefined' && 'mediaDevices' in navigator) {
         try {
-          await navigator.mediaDevices.getUserMedia({ audio: true });
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+          stream.getTracks().forEach((track) => track.stop());
           setHasMicrophonePermission(true);
+          setHasCameraPermission(true);
         } catch (error) {
-          console.error('Microphone access denied:', error);
+          console.error('Microphone/camera access denied:', error);
           setHasMicrophonePermission(false);
+          setHasCameraPermission(false);
           toast({
             variant: 'destructive',
-            title: 'Microphone Access Denied',
-            description: 'Please enable microphone permissions in your browser settings to use voice input.',
+            title: 'Media Access Denied',
+            description: 'Please enable microphone and camera permissions in your browser settings to use voice input with video emotion analysis.',
           });
         }
       }
@@ -106,6 +117,102 @@ export default function InterviewSessionPage() {
   const MAX_SPEECH_RETRIES = 2;
 
   // Initialize Speech Recognition
+  useEffect(() => {
+    return () => {
+      if (mediaStreamRef.current) {
+        mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+        mediaStreamRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!recordedVideoBlob) {
+      setRecordedVideoUrl('');
+      return;
+    }
+
+    const objectUrl = URL.createObjectURL(recordedVideoBlob);
+    setRecordedVideoUrl(objectUrl);
+
+    return () => {
+      URL.revokeObjectURL(objectUrl);
+    };
+  }, [recordedVideoBlob]);
+
+  const startVideoRecording = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+      mediaStreamRef.current = stream;
+      videoChunksRef.current = [];
+
+      const preferredMimeTypes = [
+        'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+        'video/mp4',
+        'video/webm;codecs=vp9,opus',
+        'video/webm;codecs=vp8,opus',
+        'video/webm',
+      ];
+      const supportedMimeType = preferredMimeTypes.find((type) => MediaRecorder.isTypeSupported(type));
+      const recorder = supportedMimeType ? new MediaRecorder(stream, { mimeType: supportedMimeType }) : new MediaRecorder(stream);
+      recordingMimeTypeRef.current = recorder.mimeType || supportedMimeType || 'video/webm';
+
+      recorder.ondataavailable = (event: BlobEvent) => {
+        if (event.data && event.data.size > 0) {
+          videoChunksRef.current.push(event.data);
+        }
+      };
+
+      recorder.start();
+      mediaRecorderRef.current = recorder;
+      setRecordedVideoBlob(null);
+      return true;
+    } catch (error) {
+      console.error('Could not start video recording:', error);
+      toast({
+        variant: 'destructive',
+        title: 'Video Recording Error',
+        description: 'Could not access camera for answer recording.',
+      });
+      return false;
+    }
+  }, [toast]);
+
+  const stopVideoRecording = useCallback(async (): Promise<Blob | null> => {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder) {
+      return null;
+    }
+
+    return new Promise((resolve) => {
+      const finalize = () => {
+        const blobType =
+          recordingMimeTypeRef.current ||
+          videoChunksRef.current[0]?.type ||
+          'video/webm';
+        const blob =
+          videoChunksRef.current.length > 0
+            ? new Blob(videoChunksRef.current, { type: blobType })
+            : null;
+        setRecordedVideoBlob(blob);
+        videoChunksRef.current = [];
+        mediaRecorderRef.current = null;
+        if (mediaStreamRef.current) {
+          mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+          mediaStreamRef.current = null;
+        }
+        resolve(blob);
+      };
+
+      recorder.addEventListener('stop', finalize, { once: true });
+      if (recorder.state !== 'inactive') {
+        recorder.stop();
+      } else {
+        finalize();
+      }
+    });
+  }, []);
+
   useEffect(() => {
     if (typeof window !== 'undefined') {
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -184,6 +291,7 @@ export default function InterviewSessionPage() {
         
         recognition.onend = () => {
           setIsRecording(false);
+          void stopVideoRecording();
         };
 
         recognitionRef.current = recognition;
@@ -194,16 +302,16 @@ export default function InterviewSessionPage() {
         });
       }
     }
-  }, [toast, speechRetryCount]);
+  }, [toast, speechRetryCount, stopVideoRecording]);
 
 
-  const toggleRecording = () => {
-    if (!recognitionRef.current || !hasMicrophonePermission) {
-        if(!hasMicrophonePermission) {
+  const toggleRecording = async () => {
+    if (!recognitionRef.current || !hasMicrophonePermission || !hasCameraPermission) {
+        if(!hasMicrophonePermission || !hasCameraPermission) {
             toast({
                 variant: 'destructive',
                 title: 'Cannot Record',
-                description: 'Microphone access is not granted.',
+                description: 'Microphone and camera access are required.',
             });
         }
         return;
@@ -212,10 +320,17 @@ export default function InterviewSessionPage() {
     if (isRecording) {
       recognitionRef.current.stop();
       setIsRecording(false);
+      await stopVideoRecording();
     } else {
       // Reset retry state whenever user explicitly starts recording
       setSpeechError(null);
       setSpeechRetryCount(0);
+      setDetectedEmotion('');
+
+      const videoStarted = await startVideoRecording();
+      if (!videoStarted) {
+        return;
+      }
 
       // A more robust way to prevent the InvalidStateError
       try {
@@ -228,6 +343,7 @@ export default function InterviewSessionPage() {
           console.log("Speech recognition already starting.");
         } else {
           console.error("Could not start speech recognition:", e);
+          await stopVideoRecording();
            toast({
               variant: 'destructive',
               title: 'Speech Error',
@@ -237,6 +353,47 @@ export default function InterviewSessionPage() {
       }
     }
   };
+
+  const analyzeEmotion = useCallback(async (videoBlob: Blob): Promise<boolean> => {
+    setIsEmotionLoading(true);
+    try {
+      const formData = new FormData();
+      const extension = videoBlob.type.includes('mp4') ? 'mp4' : 'webm';
+      formData.append('video', videoBlob, `answer-${Date.now()}.${extension}`);
+      formData.append('frameEveryN', '10');
+
+      const res = await fetch('/api/analyze-emotion', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => null);
+        const backendMessage =
+          errorData?.details || errorData?.error || `Request failed with status ${res.status}`;
+        toast({
+          variant: 'destructive',
+          title: 'Emotion Analysis Error',
+          description: typeof backendMessage === 'string' ? backendMessage : 'Could not analyze emotion.',
+        });
+        return false;
+      }
+
+      const data = await res.json();
+      setDetectedEmotion(data.final_emotion || '');
+      return true;
+    } catch (error) {
+      console.error('Emotion analysis error:', error);
+      toast({
+        variant: 'destructive',
+        title: 'Emotion Analysis Error',
+        description: 'Could not analyze your video emotion for this answer.',
+      });
+      return false;
+    } finally {
+      setIsEmotionLoading(false);
+    }
+  }, [toast]);
 
 
   useEffect(() => {
@@ -313,9 +470,15 @@ export default function InterviewSessionPage() {
   }, [transcript]);
 
   const handleAnswerSubmit = async () => {
+    let answerVideoBlob = recordedVideoBlob;
+    setDetectedEmotion('');
+
     if (isRecording) {
-        toggleRecording();
+      recognitionRef.current?.stop();
+      setIsRecording(false);
+      answerVideoBlob = await stopVideoRecording();
     }
+
     if (!userAnswer.trim()) {
       toast({
         variant: 'destructive',
@@ -336,6 +499,10 @@ export default function InterviewSessionPage() {
     setFeedback('');
 
     try {
+      if (answerVideoBlob) {
+        await analyzeEmotion(answerVideoBlob);
+      }
+
       const feedbackResult = await provideRealTimeFeedback({
         jobDescription,
         resume,
@@ -378,6 +545,7 @@ export default function InterviewSessionPage() {
     if (isRecording && recognitionRef.current) {
         recognitionRef.current.stop();
         setIsRecording(false);
+        void stopVideoRecording();
     }
     
     localStorage.setItem('interviewTranscript', JSON.stringify(transcript));
@@ -434,11 +602,11 @@ export default function InterviewSessionPage() {
             </CardHeader>
             <CardContent>
               <div className="space-y-4">
-                 {!hasMicrophonePermission && (
+                 {(!hasMicrophonePermission || !hasCameraPermission) && (
                     <Alert variant="destructive">
-                      <AlertTitle>Microphone Access Required</AlertTitle>
+                      <AlertTitle>Microphone and Camera Access Required</AlertTitle>
                       <AlertDescription>
-                        Please allow microphone access in your browser to use the voice input feature.
+                        Please allow microphone and camera access in your browser to use voice input and emotion video analysis.
                       </AlertDescription>
                     </Alert>
                   )}
@@ -456,11 +624,18 @@ export default function InterviewSessionPage() {
                         onClick={toggleRecording} 
                         className="absolute bottom-3 right-3"
                         aria-label={isRecording ? 'Stop recording' : 'Start recording'}
-                        disabled={!hasMicrophonePermission}
+                        disabled={!hasMicrophonePermission || !hasCameraPermission}
                     >
                         {isRecording ? <MicOff size={20} /> : <Mic size={20} />}
                     </Button>
                 </div>
+                <p className="text-xs text-muted-foreground">
+                  {isRecording
+                    ? 'Recording your answer video and voice...'
+                    : recordedVideoBlob
+                      ? 'Answer video recorded and ready for emotion analysis.'
+                      : 'Start recording to capture your answer video.'}
+                </p>
 
                 {/* Show small alert when speech network error occurs */}
                 {speechError === 'network' && (
@@ -486,8 +661,16 @@ export default function InterviewSessionPage() {
             <CardContent className="flex-1 flex flex-col justify-between">
               <div className="flex-1">
                 {isFeedbackLoading && <div className="flex items-center gap-2 text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin"/> Analyzing...</div>}
+                {isEmotionLoading && <p className="text-sm text-muted-foreground mb-2">Analyzing recorded video emotion...</p>}
+                {detectedEmotion && <p className="text-sm mb-2"><span className="font-semibold">Detected emotion:</span> {detectedEmotion}</p>}
                 {feedback && <p className="text-sm text-muted-foreground whitespace-pre-wrap">{feedback}</p>}
                 {!isFeedbackLoading && !feedback && <p className="text-sm text-muted-foreground">Submit your answer to get AI feedback.</p>}
+                {recordedVideoUrl && (
+                  <div className="mt-3">
+                    <p className="text-xs text-muted-foreground mb-2">Last recorded answer video:</p>
+                    <video src={recordedVideoUrl} controls className="w-full rounded-md border" />
+                  </div>
+                )}
               </div>
               <div className="mt-4 flex gap-4">
                 <Button onClick={handleNextQuestion} variant="outline" className="flex-1" disabled={!feedback && !isFeedbackLoading}>

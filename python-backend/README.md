@@ -21,4 +21,17 @@ The service exposes POST /extract which expects JSON { "text": "..." } and retur
   "soft_skills": []
 }
 
+The service also exposes POST /analyze-emotion (multipart/form-data):
+
+- `video`: uploaded answer video (`.webm`, `.mp4`, etc.)
+- `frame_every_n`: optional integer (default `10`)
+
+Response:
+
+{
+  "final_emotion": "neutral",
+  "frame_counts": {"neutral": 12, "happy": 4},
+  "frames_processed": 16
+}
+
 Note: The spaCy model is loaded from `./model/model-last`. Ensure the model files exist and are compatible with installed spaCy version.

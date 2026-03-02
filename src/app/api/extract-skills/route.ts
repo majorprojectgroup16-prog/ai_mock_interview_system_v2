@@ -2,12 +2,15 @@ import { NextResponse } from 'next/server';
 
 export async function POST(request: Request) {
   try {
-    const body = await request.json();
+    const body = await request.json().catch(() => ({}));
     const text = body.text || '';
+    if (!text.trim()) {
+      return NextResponse.json({ skills: [], soft_skills: [] });
+    }
 
     // Proxy to Python backend
     console.log('[extract-skills] proxying to python backend, length=', text.length);
-    const backendUrl = process.env.PYTHON_BACKEND_URL || 'http://localhost:8000/extract';
+    const backendUrl = process.env.PYTHON_BACKEND_URL || 'http://127.0.0.1:8000/extract';
     const res = await fetch(backendUrl, {
       method: 'POST',
       headers: {
@@ -22,7 +25,12 @@ export async function POST(request: Request) {
     if (!res.ok) {
       const errBody = await res.text();
       console.error('[extract-skills] backend error body:', errBody);
-      return NextResponse.json({ error: 'Python backend error', details: errBody }, { status: 502 });
+      return NextResponse.json({
+        skills: [],
+        soft_skills: [],
+        warning: 'Python backend error',
+        details: errBody,
+      });
     }
 
     const data = await res.json();
@@ -30,6 +38,11 @@ export async function POST(request: Request) {
     return NextResponse.json(data);
   } catch (err: any) {
     console.error('Error in /api/extract-skills:', err);
-    return NextResponse.json({ error: err.message || String(err) }, { status: 500 });
+    return NextResponse.json({
+      skills: [],
+      soft_skills: [],
+      warning: 'Python backend unavailable',
+      details: err?.message || String(err),
+    });
   }
 }

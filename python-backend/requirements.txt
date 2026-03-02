@@ -4,3 +4,8 @@ scikit-learn
 nltk
 fastapi
 uvicorn
+python-multipart
+opencv-python-headless
+torch
+transformers
+Pillow
